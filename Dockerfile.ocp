@@ -1,0 +1,81 @@
+# Builds MinIO from source. Intended for OpenShift BuildConfig (Docker strategy)
+# or local `podman build -f Dockerfile.ocp .`.
+#
+# .dockerignore excludes .git, so version metadata is passed via build args
+# instead of buildscripts/gen-ldflags.go (which shells out to git).
+#
+# Go 1.25 toolset: Red Hat has no go-toolset >= 1.24.8 (go.mod toolchain);
+# go.mod only requires go >= 1.24.0, and 1.25.x carries newer security fixes.
+
+FROM registry.access.redhat.com/ubi9/go-toolset:1.25 AS build
+
+# RFC3339 UTC timestamp used as MinIO version, e.g. 2025-10-15T17:29:55Z.
+# Empty = build time.
+ARG MINIO_VERSION=
+ARG MINIO_RELEASE=DEVELOPMENT
+# Empty = OPENSHIFT_BUILD_COMMIT if OpenShift injects it, else "unknown".
+ARG COMMIT_ID=
+# Limit parallel compile jobs to reduce peak memory on small build nodes.
+ARG GO_BUILD_JOBS=2
+
+USER 0
+WORKDIR /src
+
+ENV CGO_ENABLED=0 \
+    GOTOOLCHAIN=local \
+    GOFLAGS=-trimpath
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+RUN MINIO_VERSION="${MINIO_VERSION:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" && \
+    COMMIT_ID="${COMMIT_ID:-${OPENSHIFT_BUILD_COMMIT:-unknown}}" && \
+    RELEASE_TAG="${MINIO_RELEASE}.$(echo "${MINIO_VERSION}" | tr ':' '-')" && \
+    YEAR="$(echo "${MINIO_VERSION}" | cut -c1-4)" && \
+    SHORT_COMMIT="$(echo "${COMMIT_ID}" | cut -c1-12)" && \
+    LDFLAGS="-s -w \
+      -X github.com/minio/minio/cmd.Version=${MINIO_VERSION} \
+      -X github.com/minio/minio/cmd.CopyrightYear=${YEAR} \
+      -X github.com/minio/minio/cmd.ReleaseTag=${RELEASE_TAG} \
+      -X github.com/minio/minio/cmd.CommitID=${COMMIT_ID} \
+      -X github.com/minio/minio/cmd.ShortCommitID=${SHORT_COMMIT}" && \
+    go build -p "${GO_BUILD_JOBS}" -tags kqueue -ldflags "${LDFLAGS}" -o /out/minio . && \
+    /out/minio --version
+
+# Strip CRLF (Windows checkouts with core.autocrlf=true break the shebang).
+RUN sed 's/\r$//' dockerscripts/docker-entrypoint.sh > /out/docker-entrypoint.sh && \
+    chmod 755 /out/docker-entrypoint.sh
+
+FROM registry.access.redhat.com/ubi9/ubi-micro:latest
+
+ARG MINIO_VERSION=
+
+LABEL name="MinIO" \
+      version="${MINIO_VERSION}" \
+      summary="MinIO object storage built from source (AGPLv3)."
+
+ENV MINIO_ACCESS_KEY_FILE=access_key \
+    MINIO_SECRET_KEY_FILE=secret_key \
+    MINIO_ROOT_USER_FILE=access_key \
+    MINIO_ROOT_PASSWORD_FILE=secret_key \
+    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
+    MINIO_CONFIG_ENV_FILE=config.env
+
+COPY --from=build /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/minio /usr/bin/minio
+COPY --from=build /out/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
+COPY CREDITS LICENSE /licenses/
+
+RUN chmod -R 777 /usr/bin && \
+    mkdir -p /data && chgrp 0 /data && chmod 775 /data
+
+# Non-root by default; OpenShift will override with an arbitrary UID (GID 0).
+USER 1001
+
+EXPOSE 9000
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]

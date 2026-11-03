@@ -1,0 +1,55 @@
+# OpenShift build for MinIO from source using Dockerfile.ocp.
+#
+#   oc apply -f ocp/minio-build.yaml
+#   oc start-build minio --follow
+#
+# Version metadata:
+#   - COMMIT_ID: taken from OPENSHIFT_BUILD_COMMIT when OpenShift injects it,
+#     otherwise "unknown". Override with --build-arg COMMIT_ID=<sha>.
+#   - MINIO_VERSION: defaults to build time (UTC). Override with
+#     --build-arg MINIO_VERSION=2025-10-15T17:29:55Z for reproducible tags.
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: image.openshift.io/v1
+    kind: ImageStream
+    metadata:
+      name: minio
+      labels:
+        app: minio
+  - apiVersion: build.openshift.io/v1
+    kind: BuildConfig
+    metadata:
+      name: minio
+      labels:
+        app: minio
+    spec:
+      runPolicy: Serial
+      source:
+        type: Git
+        git:
+          uri: https://github.com/diego-amv/minio.git
+          ref: master
+      strategy:
+        type: Docker
+        dockerStrategy:
+          dockerfilePath: Dockerfile.ocp
+          buildArgs:
+            - name: MINIO_RELEASE
+              value: DEVELOPMENT
+            # Raise when the build pod has more memory (~1.5-2 GiB per job).
+            - name: GO_BUILD_JOBS
+              value: "2"
+      output:
+        to:
+          kind: ImageStreamTag
+          name: minio:latest
+      resources:
+        requests:
+          cpu: "2"
+          memory: 4Gi
+        limits:
+          cpu: "4"
+          memory: 6Gi
+      triggers:
+        - type: ConfigChange
