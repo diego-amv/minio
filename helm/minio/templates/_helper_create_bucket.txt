@@ -72,7 +72,7 @@ createBucket() {
 			if [ $OBJECTLOCKING = true ]; then
 				echo "Creating bucket with OBJECTLOCKING '$BUCKET'"
 				${MC} mb --with-lock myminio/$BUCKET
-			elif [ $OBJECTLOCKING = false ]; then
+			elif [ "${OBJECTLOCKING:-false}" = false ]; then
 				echo "Creating bucket '$BUCKET'"
 				${MC} mb myminio/$BUCKET
 			fi
@@ -85,12 +85,12 @@ createBucket() {
 	fi
 
 	# set versioning for bucket if objectlocking is disabled or not set
-	if [ $OBJECTLOCKING = false ]; then
-		if [ ! -z $VERSIONING ]; then
-			if [ $VERSIONING = true ]; then
+	if [ "${OBJECTLOCKING:-false}" = false ]; then
+		if [ -n "$VERSIONING" ]; then
+			if [ "$VERSIONING" = true ]; then
 				echo "Enabling versioning for '$BUCKET'"
 				${MC} version enable myminio/$BUCKET
-			elif [ $VERSIONING = false ]; then
+			elif [ "$VERSIONING" = false ]; then
 				echo "Suspending versioning for '$BUCKET'"
 				${MC} version suspend myminio/$BUCKET
 			fi

@@ -17,6 +17,10 @@ ARG MINIO_RELEASE=DEVELOPMENT
 ARG COMMIT_ID=
 # Limit parallel compile jobs to reduce peak memory on small build nodes.
 ARG GO_BUILD_JOBS=2
+# MinIO client (mc), used by the Helm chart post-install Job.
+# github.com/minio/mc is archived; this is its last release.
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+ARG MC_COMMIT_ID=7394ce0dd2a80935aded936b09fa12cbb3cb8096
 
 USER 0
 WORKDIR /src
@@ -24,6 +28,17 @@ WORKDIR /src
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local \
     GOFLAGS=-trimpath
+
+# Build mc first: independent of the MinIO sources, so it stays cached.
+RUN MC_VERSION="$(echo "${MC_RELEASE#RELEASE.}" | sed -E 's/T([0-9]{2})-([0-9]{2})-([0-9]{2})Z/T\1:\2:\3Z/')" && \
+    LDFLAGS="-s -w \
+      -X github.com/minio/mc/cmd.Version=${MC_VERSION} \
+      -X github.com/minio/mc/cmd.CopyrightYear=$(echo "${MC_VERSION}" | cut -c1-4) \
+      -X github.com/minio/mc/cmd.ReleaseTag=${MC_RELEASE} \
+      -X github.com/minio/mc/cmd.CommitID=${MC_COMMIT_ID} \
+      -X github.com/minio/mc/cmd.ShortCommitID=$(echo "${MC_COMMIT_ID}" | cut -c1-12)" && \
+    GOBIN=/out go install -p "${GO_BUILD_JOBS}" -ldflags "${LDFLAGS}" "github.com/minio/mc@${MC_RELEASE}" && \
+    /out/mc --version
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -61,10 +76,11 @@ ENV MINIO_ACCESS_KEY_FILE=access_key \
     MINIO_ROOT_USER_FILE=access_key \
     MINIO_ROOT_PASSWORD_FILE=secret_key \
     MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
-    MINIO_CONFIG_ENV_FILE=config.env
+    MINIO_CONFIG_ENV_FILE=config.env \
+    MC_CONFIG_DIR=/tmp/.mc
 
 COPY --from=build /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=build /out/minio /usr/bin/minio
+COPY --from=build /out/minio /out/mc /usr/bin/
 COPY --from=build /out/docker-entrypoint.sh /usr/bin/docker-entrypoint.sh
 COPY CREDITS LICENSE /licenses/
 

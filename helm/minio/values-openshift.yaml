@@ -1,0 +1,33 @@
+# OpenShift overrides for the image built by Dockerfile.ocp / ocp/minio-build.yaml.
+#
+#   helm install minio ./helm/minio -n <ns> -f helm/minio/values-openshift.yaml \
+#     --set rootUser=<user> --set rootPassword=<password>
+#
+# Replace <ns> in the image repositories below with the namespace that holds
+# the "minio" ImageStream (where the BuildConfig runs).
+
+image:
+  repository: image-registry.openshift-image-registry.svc:5000/<ns>/minio
+  tag: latest
+  # "latest" is mutable; pin a tag or digest for production.
+  pullPolicy: Always
+
+# Same image ships /usr/bin/mc for the post-install Job.
+mcImage:
+  repository: image-registry.openshift-image-registry.svc:5000/<ns>/minio
+  tag: latest
+  pullPolicy: Always
+
+# Let the restricted-v2 SCC assign UID/fsGroup from the namespace range.
+# Enabling this would set fixed UID/GID 1000 (rejected by restricted-v2) and
+# render a cluster-scoped SecurityContextConstraints (requires cluster-admin).
+# The image supports arbitrary UIDs (GID 0, group-writable dirs).
+securityContext:
+  enabled: false
+
+# Conservative defaults; upstream defaults are distributed/16 replicas/16Gi.
+mode: standalone
+resources:
+  requests:
+    memory: 2Gi
+    cpu: 500m
