@@ -5,6 +5,9 @@
 > - **[AIStor Free](https://min.io/download)** — Full-featured, standalone edition for community use (free license)
 > - **[AIStor Enterprise](https://min.io/pricing)** — Distributed edition with commercial support
 
+> [!TIP]
+> **OpenShift:** this fork adds a source build and Helm values for OpenShift. See [Deploy on OpenShift](#deploy-on-openshift).
+
 ---
 
 # MinIO Quickstart Guide
@@ -125,6 +128,134 @@ There are two paths for installing MinIO onto Kubernetes infrastructure:
 
 See the [MinIO Documentation](https://docs.min.io/community/minio-object-store/operations/deployments/kubernetes.html) for guidance on deploying using the Operator.
 The Community Helm chart has instructions in the folder-level README.
+
+## Deploy on OpenShift
+
+This fork builds MinIO and the MinIO Client (`mc`) **from source inside OpenShift** and deploys them with the Helm chart in [`helm/minio`](helm/minio).
+Upstream no longer publishes community binaries or images, so the other Dockerfiles in this repository (which download prebuilt binaries or extend `minio/minio` images) cannot produce new images.
+
+| File | Purpose |
+|------|---------|
+| [`Dockerfile.ocp`](Dockerfile.ocp) | Multi-stage build: compiles `minio` and `mc` on `ubi9/go-toolset:1.25`, ships them on `ubi9/ubi-micro`. Runs with any UID (GID 0), as required by the `restricted-v2` SCC. |
+| [`ocp/minio-build.yaml`](ocp/minio-build.yaml) | `ImageStream` + `BuildConfig` (Docker strategy) that builds `Dockerfile.ocp` from this fork. |
+| [`helm/minio/values-openshift.yaml`](helm/minio/values-openshift.yaml) | Chart overrides: internal registry image for MinIO and the post-install Job, no fixed UID/GID, standalone sizing. |
+
+### Prerequisites
+
+- OpenShift 4.x project where you can create builds, and the `oc` and `helm` (v3+) CLIs.
+- Build pod resources: the `BuildConfig` requests 4 GiB of memory (6 GiB limit). Compiling MinIO with less memory may get the build `OOMKilled`; lower `GO_BUILD_JOBS` or raise the limits.
+- Egress from build pods to `github.com` (source and `mc` module), `proxy.golang.org` (Go modules) and `registry.access.redhat.com` (base images).
+  Disconnected clusters need mirrors for these; `Dockerfile.ocp` does not configure a custom `GOPROXY` yet.
+
+### 1. Build the image
+
+```sh
+oc new-project minio            # or: oc project <existing-namespace>
+oc apply -f ocp/minio-build.yaml
+oc start-build minio --follow
+```
+
+The build compiles `mc` first, then `minio`, and pushes `minio:latest` to the `minio` ImageStream.
+To build from another fork or branch, edit `spec.source.git` in `ocp/minio-build.yaml`.
+To build your local working copy instead of the Git source:
+
+```sh
+oc start-build minio --from-dir=. --follow
+```
+
+### 2. Install the Helm chart
+
+Create the root credentials as a Secret instead of passing them on the command line:
+
+```sh
+oc create secret generic minio-root \
+  --from-literal=rootUser=<root-user> \
+  --from-literal=rootPassword=<root-password>
+```
+
+Install the chart, pointing both images at the ImageStream in the current namespace:
+
+```sh
+NS=$(oc project -q)
+IMAGE=image-registry.openshift-image-registry.svc:5000/$NS/minio
+
+helm install minio ./helm/minio -n "$NS" \
+  -f helm/minio/values-openshift.yaml \
+  --set image.repository="$IMAGE" \
+  --set mcImage.repository="$IMAGE" \
+  --set existingSecret=minio-root
+```
+
+`values-openshift.yaml` deploys a single standalone instance requesting 2 GiB of memory.
+For a distributed deployment, add for example `--set mode=distributed --set replicas=4` and size `resources` and `persistence` for your workload.
+Buckets, users and policies listed in `buckets`, `users` and `policies` are created by the chart's post-install Job, which uses the `mc` binary shipped in the same image.
+
+If the chart is installed in a different namespace than the ImageStream, allow its service account (`minio-sa` by default) to pull the image:
+
+```sh
+oc policy add-role-to-user system:image-puller \
+  system:serviceaccount:<app-namespace>:minio-sa -n <build-namespace>
+```
+
+> [!IMPORTANT]
+> Keep `securityContext.enabled: false` on OpenShift. Enabling it sets fixed UID/GID `1000`, which the `restricted-v2` SCC rejects, and renders a cluster-scoped `SecurityContextConstraints` object that only cluster administrators can create.
+
+### 3. Expose and verify
+
+```sh
+oc create route edge minio-api --service=minio
+oc create route edge minio-console --service=minio-console
+
+oc get pods -l app=minio
+oc exec deploy/minio -- sh -c \
+  'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc admin info local'
+```
+
+### Versioning
+
+The `BuildConfig` pins `MINIO_VERSION` to the UTC commit time of the last upstream commit included in this fork, so `minio --version` matches the chart's `appVersion` (`DEVELOPMENT.<timestamp>`).
+When merging upstream changes, update both values together:
+
+```sh
+TZ=UTC git log -1 --format=%cd --date=iso-strict-local origin/master
+# e.g. 2026-02-12T20:18:48Z
+#   ocp/minio-build.yaml    -> MINIO_VERSION: "2026-02-12T20:18:48Z"
+#   helm/minio/Chart.yaml   -> appVersion: DEVELOPMENT.2026-02-12T20-18-48Z
+```
+
+If `MINIO_VERSION` is not set, `Dockerfile.ocp` uses the build time. `COMMIT_ID` defaults to `OPENSHIFT_BUILD_COMMIT` when OpenShift provides it, otherwise `unknown`.
+
+### Build locally with Podman
+
+```sh
+podman build -f Dockerfile.ocp \
+  --build-arg MINIO_VERSION=2026-02-12T20:18:48Z \
+  --build-arg COMMIT_ID="$(git rev-parse HEAD)" \
+  -t minio:ocp .
+
+podman run --rm --user 1000680000:0 -p 9000:9000 \
+  -e MINIO_ROOT_USER=<root-user> -e MINIO_ROOT_PASSWORD=<root-password> \
+  minio:ocp server /data
+```
+
+On Git Bash for Windows, prefix `podman run` with `MSYS_NO_PATHCONV=1`; otherwise `/data` is rewritten to a Windows path and MinIO fails with `file access denied`.
+
+### Troubleshooting
+
+| Symptom | Cause / fix |
+|---------|-------------|
+| Build pod `OOMKilled` or killed during `go build` | Not enough memory for the compiler. Raise `resources.limits.memory` in the `BuildConfig` or lower `GO_BUILD_JOBS`. |
+| `ImagePullBackOff` | Wrong namespace in `image.repository` / `mcImage.repository`, or missing `system:image-puller` role across namespaces. |
+| Pod rejected with `unable to validate against any security context constraint` | `securityContext.enabled` is `true`; set it to `false`. |
+| Post-install Job fails with `/usr/bin/mc: not found` | `mcImage` points to an image without `mc`; use the image built from `Dockerfile.ocp`. |
+| Container exits with `exec ... docker-entrypoint.sh: No such file or directory` | Entrypoint with CRLF line endings, from an image built with another Dockerfile on a Windows checkout. `Dockerfile.ocp` converts it automatically. |
+
+### Limitations
+
+- **Maintenance:** upstream MinIO is no longer maintained and `minio/mc` is archived on GitHub. `mc` is pinned to its last release (`RELEASE.2025-08-13T08-35-41Z`). Security fixes for both, and for the Helm chart, are the responsibility of this fork.
+- **Go toolchain:** Red Hat does not ship `go-toolset` 1.24.8 or later (the `go.mod` toolchain), so the build uses Go 1.25.
+- **License:** MinIO and `mc` are AGPLv3. Review your obligations before distributing modified images or offering them as a service.
+- **Validation status:** the image and the chart's `mc` scripts (bucket/user creation) were validated locally with Podman and `helm template` using arbitrary UIDs; validate on your target OpenShift version before production use.
 
 ## Test MinIO Connectivity
 
