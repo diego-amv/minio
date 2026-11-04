@@ -138,7 +138,8 @@ Upstream no longer publishes community binaries or images, so the other Dockerfi
 |------|---------|
 | [`Dockerfile.ocp`](Dockerfile.ocp) | Multi-stage build: compiles `minio` and `mc` on `ubi9/go-toolset:1.25`, ships them on `ubi9/ubi-micro`. Runs with any UID (GID 0), as required by the `restricted-v2` SCC. |
 | [`ocp/minio-build.yaml`](ocp/minio-build.yaml) | `ImageStream` + `BuildConfig` (Docker strategy) that builds `Dockerfile.ocp` from this fork. |
-| [`helm/minio/values-openshift.yaml`](helm/minio/values-openshift.yaml) | Chart overrides: internal registry image for MinIO and the post-install Job, no fixed UID/GID, 4-pod distributed deployment with PDB and anti-affinity. |
+| [`helm/minio/values-openshift.yaml`](helm/minio/values-openshift.yaml) | Chart overrides: internal registry image for MinIO and the post-install Job, no fixed UID/GID, 4-pod distributed deployment with PDB and anti-affinity, no default users. |
+| [`helm/minio/values-loki.yaml`](helm/minio/values-loki.yaml) | Optional: `loki` bucket plus a least-privilege `loki` user and policy for Loki object storage. |
 
 ### Prerequisites
 
@@ -194,6 +195,26 @@ Adjust `persistence.size`, `persistence.storageClass` and `resources` for your w
 > Switching an existing release between `standalone` and `distributed` deletes the old Deployment or StatefulSet and its PVCs, and starts with empty volumes. Back up data with `mc mirror` first.
 > The number of replicas cannot be changed on a running cluster; add capacity with `pools` (e.g. `pools: 2` adds another 4 pods) or redeploy and migrate.
 Buckets, users and policies listed in `buckets`, `users` and `policies` are created by the chart's post-install Job, which uses the `mc` binary shipped in the same image.
+
+> [!CAUTION]
+> The upstream `values.yaml` creates a `console` user with password `console123` and the `consoleAdmin` (full admin) policy. `values-openshift.yaml` sets `users: []` to prevent this.
+> Releases installed before this change still have that user. Remove it with:
+> `oc exec minio-0 -- sh -c 'mc alias set local http://localhost:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" && mc admin user remove local console'`
+
+#### Storage for Loki
+
+[`values-loki.yaml`](helm/minio/values-loki.yaml) creates a `loki` bucket and a `loki` user restricted to that bucket (no bucket creation, no access to other buckets, no admin API). The password is read from a Secret:
+
+```sh
+oc create secret generic minio-loki-user -n "$NS" --from-literal=password=<loki-password>
+helm upgrade minio ./helm/minio -n "$NS" \
+  -f helm/minio/values-openshift.yaml -f helm/minio/values-loki.yaml \
+  --set image.repository="$IMAGE" --set mcImage.repository="$IMAGE" \
+  --set existingSecret=minio-root
+```
+
+Point Loki at `http://minio.<namespace>.svc.cluster.local:9000`, bucket `loki`, access key `loki`. Configure retention in Loki (compactor), not with bucket versioning.
+Helm replaces lists instead of merging them: add any other users, policies or buckets to the same file.
 
 If the chart is installed in a different namespace than the ImageStream, allow its service account (`minio-sa` by default) to pull the image:
 

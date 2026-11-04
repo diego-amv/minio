@@ -25,6 +25,12 @@ mcImage:
 securityContext:
   enabled: false
 
+# Upstream values.yaml creates user "console" / "console123" with the
+# consoleAdmin policy (full admin, well-known password). Never create it.
+# Define application users explicitly (see values-loki.yaml), with
+# existingSecret instead of inline secretKey.
+users: []
+
 # Distributed: StatefulSet of 4 pods, one PVC each, erasure coded (EC:2 by
 # default -> ~50% usable capacity; reads survive 2 pods down, writes 1).
 # Upstream defaults are 16 replicas / 16Gi / 500Gi per pod.
