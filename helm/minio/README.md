@@ -8,6 +8,12 @@ MinIO is a High Performance Object Storage released under GNU Affero General Pub
 | -------------------------- |
 | This Helm chart is community built, maintained, and supported. MinIO does not guarantee support for any given bug, feature request, or update referencing this chart. <br/><br/> MinIO publishes a separate [MinIO Kubernetes Operator and Tenant Helm Chart](https://github.com/minio/operator/tree/master/helm) that is officially maintained and supported. MinIO strongly recommends using the MinIO Kubernetes Operator for production deployments. See [Deploy Operator With Helm](https://docs.min.io/community/minio-object-store/operations/deployments/k8s-deploy-operator-helm-on-kubernetes.html?ref=github) for additional documentation. |
 
+> [!NOTE]
+> **OpenShift:** this fork's chart (version 5.5.0) adds [`values-openshift.yaml`](values-openshift.yaml) for images built from source with `Dockerfile.ocp`.
+> Install it from this directory (`./helm/minio`), not from `https://charts.min.io/`, which serves the upstream chart.
+> On OpenShift keep `securityContext.enabled: false`: the default fixed UID/GID `1000` is rejected by the `restricted-v2` SCC and renders a cluster-scoped `SecurityContextConstraints`.
+> See [Deploy on OpenShift](../../README.md#deploy-on-openshift) for build, install and troubleshooting steps.
+
 ## Introduction
 
 This chart bootstraps MinIO Cluster on [Kubernetes](http://kubernetes.io) using the [Helm](https://helm.sh) package manager.
