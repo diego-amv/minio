@@ -138,7 +138,7 @@ Upstream no longer publishes community binaries or images, so the other Dockerfi
 |------|---------|
 | [`Dockerfile.ocp`](Dockerfile.ocp) | Multi-stage build: compiles `minio` and `mc` on `ubi9/go-toolset:1.25`, ships them on `ubi9/ubi-micro`. Runs with any UID (GID 0), as required by the `restricted-v2` SCC. |
 | [`ocp/minio-build.yaml`](ocp/minio-build.yaml) | `ImageStream` + `BuildConfig` (Docker strategy) that builds `Dockerfile.ocp` from this fork. |
-| [`helm/minio/values-openshift.yaml`](helm/minio/values-openshift.yaml) | Chart overrides: internal registry image for MinIO and the post-install Job, no fixed UID/GID, standalone sizing. |
+| [`helm/minio/values-openshift.yaml`](helm/minio/values-openshift.yaml) | Chart overrides: internal registry image for MinIO and the post-install Job, no fixed UID/GID, 4-pod distributed deployment with PDB and anti-affinity. |
 
 ### Prerequisites
 
@@ -186,8 +186,13 @@ helm install minio ./helm/minio -n "$NS" \
   --set existingSecret=minio-root
 ```
 
-`values-openshift.yaml` deploys a single standalone instance requesting 2 GiB of memory.
-For a distributed deployment, add for example `--set mode=distributed --set replicas=4` and size `resources` and `persistence` for your workload.
+`values-openshift.yaml` deploys a distributed cluster: a StatefulSet of 4 pods (2 GiB memory request each) with one 100 GiB PVC per pod, a PodDisruptionBudget (`maxUnavailable: 1`) and preferred anti-affinity across nodes.
+With 4 drives MinIO uses EC:2 parity, so usable capacity is about half of the raw total; reads tolerate 2 pods down and writes 1.
+Adjust `persistence.size`, `persistence.storageClass` and `resources` for your workload, or use `--set mode=standalone` for a single pod.
+
+> [!WARNING]
+> Switching an existing release between `standalone` and `distributed` deletes the old Deployment or StatefulSet and its PVCs, and starts with empty volumes. Back up data with `mc mirror` first.
+> The number of replicas cannot be changed on a running cluster; add capacity with `pools` (e.g. `pools: 2` adds another 4 pods) or redeploy and migrate.
 Buckets, users and policies listed in `buckets`, `users` and `policies` are created by the chart's post-install Job, which uses the `mc` binary shipped in the same image.
 
 If the chart is installed in a different namespace than the ImageStream, allow its service account (`minio-sa` by default) to pull the image:

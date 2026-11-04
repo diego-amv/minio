@@ -25,9 +25,41 @@ mcImage:
 securityContext:
   enabled: false
 
-# Conservative defaults; upstream defaults are distributed/16 replicas/16Gi.
-mode: standalone
+# Distributed: StatefulSet of 4 pods, one PVC each, erasure coded (EC:2 by
+# default -> ~50% usable capacity; reads survive 2 pods down, writes 1).
+# Upstream defaults are 16 replicas / 16Gi / 500Gi per pod.
+#
+# WARNING: switching an existing release between standalone and distributed
+# deletes the old Deployment/PVC and starts with empty volumes. Back up data
+# (mc mirror) first. Replicas cannot be changed on a running cluster; grow by
+# adding pools (pools: 2 -> 8 pods) or redeploy and migrate.
+mode: distributed
+replicas: 4
+
 resources:
   requests:
     memory: 2Gi
     cpu: 500m
+
+persistence:
+  # Per pod (4 PVCs in total). Must be a Kubernetes quantity, e.g. 100Gi.
+  size: 100Gi
+  # storageClass: ""   # empty = cluster default StorageClass
+
+# Keep at least 3 of 4 pods up during node drains (write quorum).
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+# The chart sets no anti-affinity; spread pods across nodes. Switch to
+# requiredDuringSchedulingIgnoredDuringExecution when >= 4 worker nodes are
+# guaranteed to be schedulable.
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          topologyKey: kubernetes.io/hostname
+          labelSelector:
+            matchLabels:
+              app: minio
